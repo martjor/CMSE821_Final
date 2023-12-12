@@ -19,93 +19,77 @@ classdef Crystal_growth
         h
         sz
 
-        % Function handles
-        phi_initial_condition
-        T_initial_condition
-
-        % Stencils
-        stencil_phi
-        stencil_T
-        stencil_grad_x 
-        stencil_grad_y 
-
-        % Indices
-        p
-
-        % Boundary conditions
-        phi_bc
-        T_bc
+        
     end
 
     properties (Dependent)
         T_naught
         phi_naught
     end
+
+    properties (Hidden)
+        % Function handles
+        handle
+
+        % Stencils
+        mask
+        stencil
+    end
     
     methods
         function obj = Crystal_growth(params,...
                                       phi_naught,...
                                       T_naught,...
+                                      mask,...
                                       phi_bc,...
                                       T_bc)
             arguments
                 params
-                phi_naught
-                T_naught
-                phi_bc = @(phi) Crystal_growth.boundary_conditions(phi)
-                T_bc = @(T,x) Crystal_growth.boundary_conditions(T)
+                phi_naught      
+                T_naught 
+                mask                = struct;
+                phi_bc              = @(phi,x) Crystal_growth.bc(phi);
+                T_bc                = @(T,x)   Crystal_growth.bc(T);
             end
 
             %CRYSTAL_GROWTH Constructs an instance of the problem given the
             %   set of parameters contained in params.
 
             %   Set Allen-Cahn parameters
-            obj.M = params.M;
-            obj.alpha = params.alpha;
-            obj.gamma = params.gamma;
-            obj.Tm = params.Tm;
-
-            %   Determine parameters for scalar field coefficient
-            if isnumeric(params.epsilon)
-                obj.epsilon = params.epsilon;
-            else
-            end
+            obj.M                   = params.M;
+            obj.alpha               = params.alpha;
+            obj.epsilon             = params.epsilon;
+            obj.gamma               = params.gamma;
+            obj.Tm                  = params.Tm;
 
             % Set heat equation parameters
-            obj.K = params.K;
+            obj.K                   = params.K;
 
             % Set discretization
-            obj.h = params.h;
-            obj.x = params.xlim(1):obj.h:params.xlim(2);
-            obj.y = params.ylim(1):obj.h:params.ylim(2);
-            [obj.x,obj.y] = meshgrid(obj.x,obj.y);
-
-            % Determine points accesible by stencils
-            m = length(obj.y);
-            n = length(obj.x);
-            obj.sz = [m,n];
-
-            obj.p = reshape((2:m-1)' + (1:n-2) * m,1,1,[]);
-
+            obj.h           = params.h;
+            obj.x           = params.xlim(1):obj.h:params.xlim(2);
+            obj.y           = params.ylim(1):obj.h:params.ylim(2);
+            obj.sz          = [numel(obj.y) numel(obj.x)];
+            [obj.x,obj.y]   = meshgrid(obj.x,obj.y);
+            
+            
             % Determine stencils
-            obj.stencil_phi = params.stencil_phi * (1/obj.h^2);
-            obj.stencil_T   = params.stencil_T   * (1/obj.h^2);
-            obj.stencil_grad_x = [0 0  0; -1 0 1; 0 0 0] * (1/(2*obj.h));
-            obj.stencil_grad_y = [0 -1 0;  0 0 0; 0 1 0] * (1/(2*obj.h));
+            obj.stencil = Stencil(size(obj.x));
+            obj.mask = obj.generate_mask(obj.h,mask);
 
             % Function handles
-            obj.phi_initial_condition = phi_naught;
-            obj.T_initial_condition = T_naught;
-            obj.phi_bc = phi_bc;
-            obj.T_bc = T_bc;
+            obj.handle.phi.bc           = phi_bc;
+            obj.handle.phi.initial      = phi_naught;
+            obj.handle.T.bc             = T_bc;
+            obj.handle.T.initial        = T_naught;
         end
 
         function val = get.phi_naught(obj)
-            val = obj.phi_initial_condition(obj.x,obj.y);
+            val = obj.handle.phi.initial(obj.x,obj.y);
         end
 
         function val = get.T_naught(obj)
-            val = obj.T_initial_condition(obj.x,obj.y);
+            val = obj.handle.T.initial(obj.x,obj.y);
         end
         
         function [phi,T] = step(obj,phi,T,k)
@@ -115,17 +99,16 @@ classdef Crystal_growth
 
             % Take one step in phi field
             phi = phi + k * -obj.M * (obj.df_dphi(phi) - ...
-                                      obj.laplacian(phi,...
-                                                    obj.stencil_phi,...
-                                                    epsilon=obj.epsilon) +...
+                                      obj.diffusion(phi,...
+                                                    coeff=obj.epsilon) +...
                                       obj.m(phi,T));
 
             % Take one step in Temperature field
-            T = T + k * (obj.laplacian(T,obj.stencil_T) + obj.K * (phi-phi_prev)/k);
+            T = T + k * (obj.diffusion(T) + obj.K * (phi-phi_prev)/k);
 
             % Boundary conditions
-            phi = obj.phi_bc(phi);
-            T = obj.T_bc(T,obj.x);
+            phi     = obj.handle.phi.bc(phi);
+            T       = obj.handle.T.bc(T,obj.x);
         end
 
         function res = df_dphi(obj,phi)
@@ -139,71 +122,83 @@ classdef Crystal_growth
                   atan(obj.gamma * (T-obj.Tm));
         end
 
-        function res = laplacian(obj,f,stencil_arr,args)
+        function res = diffusion(obj,f,args)
+            %DIFFUSION calculates the diffusion term of a scalar field. It
+            %can either accept scalar fields or scalars as coefficients
             arguments
                 obj
                 f
-                stencil_arr
-                args.epsilon = 1;
+                args.coeff = 1;
             end
             
             % Check for coefficient type
-            if isnumeric(args.epsilon)
-                % Constant coefficient case. The laplacian can be evaluated
-                % without consideration of an additional scalar field
-                res =  args.epsilon^2 * stencil(f,obj.p,stencil_arr);
+            if isnumeric(args.coeff)
+                % Constant coefficient case. The diffusion term simply
+                % corresponds to the laplacian of the scalar field
+                res =  args.coeff^2 * obj.stencil.apply(f,obj.mask.lap);
 
-            elseif isa(args.epsilon,'cell')
-                % Nonconstant coefficient (scalar field).
-                epsilon = args.epsilon(1);
-                delta = args.epsilon(2);
-                s = args.epsilon(3);
-                theta_naught = args.epsilon(4);
+            elseif isa(args.coeff,'function_handle')
+                % Scalar field as coefficient case. The scalar field that
+                % will serve as the coefficient must be evaluated first.
 
-                % Calculate angle
-                theta = obj.inward_vector(phi);
+                % Evaluate coefficient and its derivative
+                [g,g_prime] = args.coeff(f);
 
-                % Calculate scalar fields
-                phase = s * (theta - theta_naught);
+                % Evaluate laplacian term
+                lap = obj.stencil.apply(f,obj.mask.lap,g.^2);
 
-                g = epsilon * (1 + delta * cos(phase));
-                g_prime = epsilon * delta * sin(phase);
+                % Evaluate cross terms
+                %   Evaluate product
+                prod    = g .* g_prime;
+
+                term1   = obj.stencil.apply(prod,obj.mask.dx) .*...
+                          obj.stencil.apply(f,obj.mask.dy);
+
+                term2   = obj.stencil.apply(prod,obj.mask.dy) .*...
+                          obj.stencil.apply(f,obj.mask.dx);
+                            
+                % Evaluate result
+                res = lap - term1 + term2;
             end
-        end
-
-        function [fx,fy,mag,idx] = grad(obj,f)
-            fx = stencil(f,obj.p,obj.stencil_grad_x);
-            fy = stencil(f,obj.p,obj.stencil_grad_y);
-
-            mag = hypot(fx,fy);
-            idx = mag > 0.01 * obj.h;
-        end
-
-        function [theta,nx,ny] = inward_vector(obj,f)
-            % Allocate memory
-            nx = zeros(obj.sz);
-            ny = zeros(obj.sz);
-            theta = zeros(obj.sz);
-
-            % Calculate gradient
-            [fx,fy,mag,idx] = obj.grad(f);
-
-            % Calculate inward vector
-            nx(idx) = fx(idx) ./ mag(idx);
-            ny(idx) = fy(idx) ./ mag(idx);
-            
-            % Calculate angle
-            theta(idx) = atan2(ny(idx),nx(idx));
         end
     end
 
 
     methods (Static)
-        function U = boundary_conditions(U)
+        function U = bc(U)
             U(1,2:end-1) = U(2,2:end-1);          % North row
             U(end,2:end-1) = U(end-1,2:end-1);    % South row 
             U(1:end,1) = U(1:end,2);              % West row
             U(1:end,end) = U(1:end,end-1);        % East row
+        end
+
+        function mask = generate_mask(h,mask)
+            %GENERATE_MASK Generates the masks for the stencils to
+            %calculate the derivatives of the fields
+
+            % Central difference for the laplacian
+            if ~isfield(mask,'lap')
+                mask.lap = [0  1  0;
+                            1 -4  1;
+                            0  1  0];
+            end
+
+            % Central difference for the derivatives
+            if ~isfield(mask,'dx')
+                mask.dx = [0  0  0;
+                           -1 0  1;
+                           0  0  0];
+            end
+
+            if ~isfield(mask,'dy')
+                mask.dy = [0 -1  0;
+                           0  0  0;
+                           0  1  0];
+            end
+
+            mask.lap        = mask.lap * (1/h^2); 
+            mask.dx         = mask.dx  * (2*h);
+            mask.dy         = mask.dy  * (2*h);
         end
     end
 end
