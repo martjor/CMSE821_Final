@@ -62,9 +62,14 @@ classdef Crystal_growth
             %   Set Allen-Cahn parameters
             obj.M = params.M;
             obj.alpha = params.alpha;
-            obj.epsilon = params.epsilon;
             obj.gamma = params.gamma;
             obj.Tm = params.Tm;
+
+            %   Determine parameters for scalar field coefficient
+            if isnumeric(params.epsilon)
+                obj.epsilon = params.epsilon;
+            else
+            end
 
             % Set heat equation parameters
             obj.K = params.K;
@@ -149,8 +154,20 @@ classdef Crystal_growth
                 res =  args.epsilon^2 * stencil(f,obj.p,stencil_arr);
 
             elseif isa(args.epsilon,'cell')
-                % Nonconstant coefficient (scalar field). 
+                % Nonconstant coefficient (scalar field).
+                epsilon = args.epsilon(1);
+                delta = args.epsilon(2);
+                s = args.epsilon(3);
+                theta_naught = args.epsilon(4);
 
+                % Calculate angle
+                theta = obj.inward_vector(phi);
+
+                % Calculate scalar fields
+                phase = s * (theta - theta_naught);
+
+                g = epsilon * (1 + delta * cos(phase));
+                g_prime = epsilon * delta * sin(phase);
             end
         end
 
@@ -162,7 +179,7 @@ classdef Crystal_growth
             idx = mag > 0.01 * obj.h;
         end
 
-        function [nx,ny,theta] = inward_vector(obj,f)
+        function [theta,nx,ny] = inward_vector(obj,f)
             % Allocate memory
             nx = zeros(obj.sz);
             ny = zeros(obj.sz);
@@ -179,6 +196,7 @@ classdef Crystal_growth
             theta(idx) = atan2(ny(idx),nx(idx));
         end
     end
+
 
     methods (Static)
         function U = boundary_conditions(U)
